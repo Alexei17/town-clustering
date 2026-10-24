@@ -1,6 +1,8 @@
 {
     "archives": null,
     "files": [
+        "clustering_core.lua",
+        "snapshot.lua",
         "town_clustering.gs.lua",
         "town_clustering.script.tl"
     ]

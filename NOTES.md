@@ -39,8 +39,23 @@ Modelled on `mods/release/urbangames_sandbox`:
   content/...
 ```
 
-Resource names drop `content/` and the final `.tl`/`.lua`:
-`content/foo.script.tl` is addressed as `<modid>::/foo.script`.
+Resource names drop `content/`. Whether they also drop the extension depends on
+what is doing the addressing, and getting it wrong costs a game launch:
+
+| used by | form | example |
+|---|---|---|
+| script hooks in `mod.json` and `.gs.lua` | **no** extension | `<modid>::/foo.script@update` |
+| `ug_require` | **with** extension | `<modid>::/foo.lua`, `::/scripts/entity_util.tl` |
+
+The base game's own calls settle the second row - `ug_require "::/scripts/mathutil.lua"`,
+`ug_require "/gui/main/react.lua"`, `ug_require "main_page.tl"` (a bare relative
+name also works for a sibling file). An empty modid, as in `::/scripts/...`, means
+the base game.
+
+Dropping the extension in a `ug_require` fails at load with
+`module '<modid>::/<name>' not found`, logged once per worker thread, and the
+game script never runs - the mod otherwise loads and appears active, so the only
+symptom is silence in the log.
 
 Script hooks in `mod.json` use `"<modid>::/<file>.script@<fn>"`.
 `preRunFn(captureParams, configDict, allModParams, baseConfig)` is where
@@ -106,17 +121,49 @@ to settle it.
 
 ## Open questions (Phase 0 spike)
 
-1. **Does `_reactDoReplaceRecipes` run for the menu UI state at all?** The
-   engine hardcodes two GUI entry points — `gui/main/game.lua` and
-   `gui/menu/main_menu.tl` — and only the first one loads `bootstrap_game.tl`.
-   If the menu is a separate Lua state, it never gets replacements and this
-   approach cannot work. **This gates everything else.**
+1. ~~**Does `_reactDoReplaceRecipes` run for the menu UI state at all?**~~
+   **Answered: no, and the menu cannot be modded at all.** Settled by reading
+   `gui.zip` rather than by probing:
+
+   - `react-replacement-config` is read in **exactly one file** in the whole of
+     `gui.zip` — `gui/main/bootstrap_game.tl`, which defines
+     `global _reactDoReplaceRecipes` and is reached only from `gui/main/game.lua`,
+     the in-game entry point.
+   - `gui/menu/main_menu.tl` contains none of that machinery: no `genericRep`,
+     no `getAllOfType`, no bootstrap, no replacement call. Nothing on the menu
+     path ever defines or calls `_reactDoReplaceRecipes`.
+   - `doReplacements()` ends by setting `_react.recipeReplacementAllowed = false`,
+     so even reaching `GloballyReplaceRecipeBeforeInitInternal` later is refused
+     (`react.lua:446`).
+
+   So no mod can replace a menu recipe, and the seam a menu-side approach would
+   need — `builtin.MapPreviewComp`'s `onReady` storing into `mapState`, which
+   `app.startGame2` then reads (`new_game_or_map_settings_page.tl:829, 846, 618,
+   628`) — sits inside a menu recipe, which is the one thing that cannot be
+   replaced.
+
+   **Consequences.** Rewriting `map.towns` between generation and `startGame2`
+   is not reachable, so the tick-1 rebuild is not a design choice that could be
+   tidied away later: it is forced. Nor can a mod draw anything in the new game
+   dialog, so a clustered preview beside the stock map preview is out. The only
+   mod-reachable lever on that dialog remains a custom terrain generator
+   (`.gen.lua`, confirmed in-game to appear in the dropdown), which has no town
+   output and no UI.
+
+   Seeing the clustering before starting a game therefore has to happen outside
+   the game — which is what `tools/preview` is for.
+
+   Questions 2 and 3 below are moot as a result; they are kept because they
+   describe the shape of the thing that was being attempted.
 2. Can a replaced builtin be called through to, via the clear/restore trick?
 3. Does handing a `GameMap` back as `initialMap` make the preview draw *our*
    towns, or is `initialMap` only read at mount? Fallback is `inputMap` with
    `generateTowns = false` — flip `FEEDBACK_MODE` in the script.
 4. How is `GameMap.heightmap` indexed relative to `numTilesX/numTilesY` and
-   `resolution`, and what is the shape/range of `Town.sizeFactors`?
+   `resolution`, and what is the shape/range of `Town.sizeFactors`? The *fields*
+   are now known — see "Getting a map out of the game" below — but the indexing
+   itself is still only what the declaration implies, not something that has
+   been read back from a running game.
 
 A `MapPreviewComp`-level wrapper probably **cannot** read the mod's own slider
 values: they live in `activeModsParamsState`, a react state threaded through the
@@ -309,3 +356,142 @@ having those fields invented.
 
 Creation is asynchronous and not fast: 18 towns took about two and a half
 minutes of game ticks to appear on a medium map.
+
+## Getting a map out of the game (for offline work)
+
+Found while building `tools/preview`, which runs the clustering against a map
+that was generated once instead of generating one per attempt.
+
+### `GameMap` carries everything the clustering needs
+
+From `api/tealdef/api/type.d.tl`:
+
+```
+heightmap : {number}
+numTilesX : integer     -- tiles of 256 m x 256 blocks
+numTilesY : integer
+levels : integer
+offsetZ : number
+waterLevel : number
+climateId : string
+resolution : Vec3f
+towns : {GameMap.Town}
+industries : {GameMap.Industry}
+townConnections : {{integer, integer}}
+```
+
+Two of those matter more than they look:
+
+- **`waterLevel`** means water does not need a separate mask. Rivers and lakes
+  are carved into the terrain and filled to this height, so `isOnWater(p)` is
+  reproducible offline as `heightAt(p) <= waterLevel`. That is what lets the
+  core's buildability test run outside the game unchanged.
+- **`townConnections`** is on the map itself, so the road network is available
+  without calling `getDefaultTownConnections`.
+
+`makeMapFromGame(withHeightmap, withTowns, withIndustries, withAssets)` is the
+way to fill one in from a running game; the mod passes `false` for the heightmap
+because it asks the engine about terrain point by point instead.
+
+### The Map Editor already exports towns to disk
+
+`gui/map_editor/map_editor.tl` (in `base/content/gui.zip`) has import/export for
+both heightmaps and towns+industries. The towns side writes a **plain Lua
+table**, which is why `local/towns_industries/` exists:
+
+```lua
+app.saveUserdata("towns_industries", name, {
+    towns = { { name =, position = { x =, y = }, sizeFactors =,
+                landUse2CargoNeedsCategories = }, ... },
+    industries = { { position =, angle =, onWater =, tag =, fileName = }, ... },
+})
+```
+
+`landUse2CargoNeedsCategories` keys are `"res"`, `"com"`, `"ind"` on the way out
+and are mapped back to `LandUseType` on the way in. Import skips any entry whose
+position fails `isValidCoordinate`.
+
+So a generated map's towns can be had with no mod code at all, and the file can
+be read straight into a tool — it is already Lua.
+
+The heightmap side is `app.writeHeightmap(map, path, writeStl, sixteenBits,
+biomesData)`, which writes an **image**, not numbers, and the export dialog has
+its own water-level slider that the encoding is relative to. Decoding it was not
+attempted; dumping `GameMap.heightmap` numerically through `saveUserdata` is the
+cheaper route.
+
+### `app` is GUI-state only
+
+`app.saveUserdata` / `loadUserdata` / `getAllUserdata` / `removeUserdata` and
+`writeHeightmap` all live on `app`, and **no script under `base/` outside
+`gui.zip` touches `app.*`** — checked across `scripts.zip`, `game_mechanics.zip`,
+`base.zip` and `economy.zip`.
+
+A game script therefore cannot be assumed to reach it. Writing a snapshot from
+the mod needs a GUI-state script hung off `react-replacement-config` (see "GUI
+extension" above), in the state that is allowed to require `::/gui/...`. Not
+written yet — the Map Editor's own export covers the towns in the meantime.
+
+### Writing a file from a game script: you cannot, so use the log
+
+Three channels were considered for getting a snapshot out of a running game:
+
+| channel | verdict |
+|---|---|
+| `app.saveUserdata` | GUI-state only; unreachable from a game script |
+| `io.*` / `os.*` | **no occurrence anywhere** in `scripts.zip`, `game_mechanics.zip`, `base.zip` or `gui.zip` — no precedent, and unverifiable without launching |
+| `log.message` | already used by this mod, known to work |
+
+So the snapshot goes out as log lines into `crash_dump/stdout.txt` and is read
+back by `tools/preview/from_log.lua`. It looks crude and it is completely
+reliable: a 385x385 terrain grid is about 0.9 MB of log, and the round trip is
+covered by `tools/preview/selftest.lua`.
+
+The grid is sampled through `api.engine.terrain.getHeightAt` and `isOnWater`
+rather than taken from `GameMap.heightmap`, which sidesteps open question 4
+entirely — no assumption about heightmap indexing is needed, and `isOnWater` is
+recorded as the engine's own answer instead of being inferred from `waterLevel`.
+
+Map extent comes from bisecting `isValidCoordinate` outwards from a town, for the
+same reason: `numTilesX`/`resolution` would require knowing how the heightmap is
+laid out.
+
+### The Map Editor does not place towns the way a new game does
+
+Worth knowing before trusting an editor export to represent a seed:
+
+- The editor's terrain generation sets `mode.generateTowns = false`
+  (`map_editor.tl`, the heightmap `computeMode`).
+- Its towns come from `TownIndustryGenerationMode.numTownsToAdd` — an explicit
+  count.
+- The new game dialog instead uses `HeighmapGenerationMode.generateTowns = true`,
+  driven by the Town Density parameters (`townFrequency`, `populationDensity`,
+  `maxNumberPerArea`).
+
+Different inputs, so for a given seed the editor's town positions are not
+reliably the ones a new game would produce. Terrain should match. The editor is
+fine for tuning against *a* real map; it cannot answer "what will this seed give
+me".
+
+### Town borders are native; measure the buildings instead
+
+The game draws a border around each town, and there is no radius behind it that
+Lua can read. The only handle is `showTownBorders`, a boolean on a construction
+menu's `hudIcons` (`gui/construction/construction_menu.d.tl:163`, "only working
+when componentTypes contains TOWN"), used by `town_builder_tool.script.tl`. The
+engine draws it; nothing returns a number.
+
+`Engine.Component.Town` has `sizeFactors`, `initialLandUseCapacities` and
+`capacityScalingFactor`, but no extent, and `TownBuildingSystem` exposes
+capacities and building lists rather than any geometry.
+
+What does work is measuring it. `townBuildingSystem.getTown2BuildingMap()` gives
+each town's buildings, and `entity_util.getPosition` gives each building a
+position, so the spread of a town's own buildings around its centre *is* its
+extent. The snapshot records the 50th, 90th and furthest distance per town; the
+previewer draws the 90th, because one outlying building would put a border well
+outside anything that reads as the town.
+
+This is measured on the generator's towns, before anything is moved. A relocated
+town keeps its name and `sizeFactors`, so its measured extent travels with it and
+is a fair estimate of what it will spread to at its new position.

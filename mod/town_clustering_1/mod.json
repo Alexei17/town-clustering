@@ -68,6 +68,35 @@
             ],
             "yearFrom": 0,
             "yearTo": 0
+        },
+        {
+            "defaultIndex": 1,
+            "key": "cluster.spacing",
+            "name": "Town Spacing",
+            "tooltip": "How close together towns in a cluster may stand.\n\n600 m is the original behaviour and the densest the game has been seen to accept. Clusters settle very near whatever this is set to, so the looser settings spread a cluster out into a group of towns rather than one mass. Even 1300 m is about twice as dense as the map generator's own spacing.\n\nLoosening this needs more buildable ground, so watch for towns that cannot be placed on a cramped or mountainous map.",
+            "uiType": "Slider",
+            "values": [
+                "600 m",
+                "800 m",
+                "1000 m",
+                "1300 m"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
+        },
+        {
+            "defaultIndex": 1,
+            "key": "cluster.snapshot",
+            "name": "Debug: Map Snapshot",
+            "tooltip": "FOR MOD DEVELOPERS. Leave this Off for normal play - it changes nothing about how the mod clusters, it only writes data out.\n\nWhat it does: records the generated map - every town, and the terrain on a 32 m grid - into the game log, so the clustering can be tried out offline instead of generating a map for every experiment.\n\nSnapshot Only also skips the clustering, leaving towns exactly where the generator put them, so the run is over in seconds. Start a new game on the seed you want, wait for 'snapshot complete' in the log, and quit - nothing has been changed.\n\nThen run tools\\snapshot.ps1 to recover it and tools\\studio.ps1 to explore every setting against that map. See tools\\preview\\README.md.",
+            "uiType": "Slider",
+            "values": [
+                "Off",
+                "Snapshot Only",
+                "Snapshot, Then Cluster"
+            ],
+            "yearFrom": 0,
+            "yearTo": 0
         }
     ],
     "preRunScript": {
@@ -76,7 +105,7 @@
     "postRunScript": {
         "fileName": ""
     },
-    "revision": 1,
+    "revision": 2,
     "runScript": {
         "fileName": ""
     },
